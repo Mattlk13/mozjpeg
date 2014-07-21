@@ -57,6 +57,17 @@ jpeg_add_quant_table (j_compress_ptr cinfo, int which_tbl,
     if (temp > 32767L) temp = 32767L; /* max quantizer needed for 12 bits */
     if (force_baseline && temp > 255L)
       temp = 255L;		/* limit to baseline range if requested */
+
+    // A trick of using low quality on "Retina" displays breaks down when using too low quality
+    // when DC (and few first ACs) gets quantized too hard
+    const int max_decent_dc_quantization = which_tbl ? 12 : 8;
+    if (i == 0 && temp > max_decent_dc_quantization) {
+      temp = (max_decent_dc_quantization*2 + temp) / 3;
+    }
+    else if (i < 4 && temp > max_decent_dc_quantization) {
+      temp = (max_decent_dc_quantization + temp)/2;
+    }
+
     (*qtblptr)->quantval[i] = (UINT16) temp;
   }
 
