@@ -340,29 +340,47 @@ METHODDEF(void)
 convsamp (JSAMPARRAY sample_data, JDIMENSION start_col, DCTELEM * workspace)
 {
   register DCTELEM *workspaceptr;
-  register JSAMPROW elemptr;
   register int elemr;
+  const int overflow = 270;
+
+  // Deringing trick:
+  // Samples with value < 255 are unchanged
+  // Samples with >= 255 are interpreted as 270 and blurred with neighbors
+  // Result of the blur is clamped to be >= 255
+  // To use this you must ./configure --without-simd
 
   workspaceptr = workspace;
   for (elemr = 0; elemr < DCTSIZE; elemr++) {
-    elemptr = sample_data[elemr] + start_col;
+    JSAMPROW elemptr = sample_data[elemr] + start_col;
+    JSAMPROW elemptr_prev = elemr > 0 ? (sample_data[elemr - 1] + start_col) : elemptr;
+    JSAMPROW elemptr_next = elemr < DCTSIZE - 1 ? (sample_data[elemr + 1] + start_col) : elemptr;
 
-#if DCTSIZE == 8		/* unroll the inner loop */
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-    *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
-#else
-    {
-      register int elemc;
-      for (elemc = DCTSIZE; elemc > 0; elemc--)
-        *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+    int current = GETJSAMPLE(elemptr[0]);
+    int next = GETJSAMPLE(elemptr[1]);
+    int prev = current;
+    int elemc;
+    for (elemc = 0; elemc < DCTSIZE; elemc++) {
+      current = GETJSAMPLE(elemptr[elemc]);
+      if (current >= 255) {
+
+        next = GETJSAMPLE(elemptr[elemc < DCTSIZE - 1 ? elemc + 1 : DCTSIZE - 1]);
+        if (next >= 255) next = overflow;
+
+        int prevrow = elemptr_prev[elemc]; if (prevrow >= 255) prevrow = overflow;
+        int nextrow = elemptr_next[elemc]; if (nextrow >= 255) nextrow = overflow;
+
+        int avg = (overflow + prevrow + nextrow + prev + next)/5;
+        if (avg > 255) {
+          *workspaceptr++ = avg - CENTERJSAMPLE;
+        } else {
+          *workspaceptr++ = current - CENTERJSAMPLE;
+        }
+      } else {
+        *workspaceptr++ = current - CENTERJSAMPLE;
+      }
+
+      prev = current;
     }
-#endif
   }
 }
 
