@@ -30,6 +30,8 @@
 typedef JMETHOD(void, forward_DCT_method_ptr, (DCTELEM * data));
 typedef JMETHOD(void, float_DCT_method_ptr, (FAST_FLOAT * data));
 
+typedef void (*preprocess_method_ptr)(DCTELEM*);
+
 typedef JMETHOD(void, convsamp_method_ptr,
                 (JSAMPARRAY sample_data, JDIMENSION start_col,
                  DCTELEM * workspace));
@@ -52,6 +54,7 @@ typedef struct {
   /* Pointer to the DCT routine actually in use */
   forward_DCT_method_ptr dct;
   convsamp_method_ptr convsamp;
+  preprocess_method_ptr preprocess;
   quantize_method_ptr quantize;
 
   /* The actual post-DCT divisors --- not identical to the quant table
@@ -332,6 +335,61 @@ start_pass_fdctmgr (j_compress_ptr cinfo)
 }
 
 
+METHODDEF(void)
+preprocess_deringing(DCTELEM *data)
+{
+  // Overflows white pixels by up to 15 to hide compression artefacts (thanks to clamping)
+  // The overflown area has 1d blur applied in zig-zag order to avoid creation of new edges
+
+  const int overflow = 15;
+  const int maxsample = 255 - CENTERJSAMPLE;
+  const int size = DCTSIZE * DCTSIZE;
+
+  // if DC is already maximum it means there are no pixels that would cause ringing, so exit early.
+  // It should also improve DC compression by avoiding unnecessarily large step.
+  int n;
+  int sum=0;
+  for (n = 0; n < size; n++) {
+    sum += data[n];
+  }
+  int dc = sum/size;
+  if (dc >= maxsample) {
+    return;
+  }
+
+  int prev = data[jpeg_natural_order[0]];
+  int current;
+  int next = data[jpeg_natural_order[1]];
+
+  if (prev >= maxsample) {
+    prev = maxsample + overflow;
+  }
+  current = prev;
+  if (next >= maxsample) {
+    next = maxsample + overflow;
+  }
+
+  for (n = 0; n < size; n++) {
+    if (current >= maxsample) { // only overflown area is blurred
+      int avg = (prev + current + next)/3;
+      if (avg < maxsample) { // and only if it stays invisible
+        avg = maxsample;
+      }
+      data[jpeg_natural_order[n]] = avg;
+    }
+
+    prev = current;
+    current = next;
+
+    if (n < size-2) {
+      next = data[jpeg_natural_order[n+2]];
+      if (next >= maxsample) {
+        next = maxsample + overflow;
+      }
+    }
+  }
+}
+
 /*
  * Load data into workspace, applying unsigned->signed conversion.
  */
@@ -427,6 +485,7 @@ forward_DCT (j_compress_ptr cinfo, jpeg_component_info * compptr,
   /* Make sure the compiler doesn't look up these every pass */
   forward_DCT_method_ptr do_dct = fdct->dct;
   convsamp_method_ptr do_convsamp = fdct->convsamp;
+  preprocess_method_ptr do_preprocess = fdct->preprocess;
   quantize_method_ptr do_quantize = fdct->quantize;
   workspace = fdct->workspace;
 
@@ -435,6 +494,8 @@ forward_DCT (j_compress_ptr cinfo, jpeg_component_info * compptr,
   for (bi = 0; bi < num_blocks; bi++, start_col += DCTSIZE) {
     /* Load data into workspace, applying unsigned->signed conversion */
     (*do_convsamp) (sample_data, start_col, workspace);
+
+    (*do_preprocess) (workspace);
 
     /* Perform the DCT */
     (*do_dct) (workspace);
@@ -930,6 +991,9 @@ jinit_forward_dct (j_compress_ptr cinfo)
       fdct->convsamp = jsimd_convsamp;
     else
       fdct->convsamp = convsamp;
+
+    fdct->preprocess = preprocess_deringing;
+
     if (jsimd_can_quantize())
       fdct->quantize = jsimd_quantize;
     else
